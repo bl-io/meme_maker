@@ -3,25 +3,16 @@ import argparse
 import json
 import os
 import re
+import sys # For exit
 import requests
 from io import BytesIO
 from PIL import Image, UnidentifiedImageError
 
-# --- Core Image Processing Function (adapted from eat_it) ---
+# --- Core Image Processing Function (Resizing removed) ---
 def process_image(base_img, mask_img, photo_img, position_info, is_swap=False, layer=0):
     """
     Processes and composites images based on mask and position.
-
-    Args:
-        base_img (PIL.Image.Image): The base template image.
-        mask_img (PIL.Image.Image): The mask image.
-        photo_img (PIL.Image.Image): The profile photo image.
-        position_info (list): Position data [x, y, optional_next_id].
-        is_swap (bool): Whether to swap layering order (base on top). Defaults to False.
-        layer (int): Recursion layer depth. Defaults to 0.
-
-    Returns:
-        PIL.Image.Image: The composited image, or None if an error occurs.
+    (Final resizing to 512px is REMOVED from this function)
     """
     print(f"Processing layer {layer} with position: {position_info}")
     try:
@@ -73,7 +64,8 @@ def process_image(base_img, mask_img, photo_img, position_info, is_swap=False, l
 
         # Create masked photo layer
         masked_photo = Image.new("RGBA", mask_size, (0, 0, 0, 0)) # Ensure transparent background
-        masked_photo.paste(scaled_photo, mask=mask_img) # Use mask_img's alpha channel
+        # Correct paste: Use the mask's alpha channel to blend the photo onto the transparent layer
+        masked_photo.paste(scaled_photo, (0, 0), mask=mask_img)
 
         # Get position coordinates
         pos_x, pos_y = position_info[0], position_info[1]
@@ -83,33 +75,17 @@ def process_image(base_img, mask_img, photo_img, position_info, is_swap=False, l
             print("Swapping layers: Base on top")
             # Create a temporary layer for pasting the base on top
             temp_comp = Image.new("RGBA", base_img.size, (0, 0, 0, 0))
-            # Paste masked photo onto this temp layer
-            temp_comp.paste(masked_photo, (pos_x, pos_y), masked_photo)
-            # Paste original base image on top of the photo
-            temp_comp.paste(base_img, (0, 0), base_img)
+            # Paste masked photo onto this temp layer at the correct position
+            temp_comp.paste(masked_photo, (pos_x, pos_y), masked_photo) # Use masked_photo's alpha
+            # Paste original base image on top of the photo layer
+            temp_comp.paste(base_img, (0, 0), base_img) # Use base_img's alpha
             base_img = temp_comp # Update base_img with the result
         else:
             print("Standard layering: Photo on top")
             # Paste masked photo directly onto base image
-            base_img.paste(masked_photo, (pos_x, pos_y), masked_photo)
+            base_img.paste(masked_photo, (pos_x, pos_y), masked_photo) # Use masked_photo's alpha
 
-        # --- Final Resizing --- (Ensure largest dimension is 512px)
-        temp_dim = max(base_img.size[0], base_img.size[1])
-        if temp_dim != 512 and temp_dim > 0: # Avoid division by zero
-            scale_final = 512 / temp_dim
-            final_width = int(base_img.size[0] * scale_final)
-            final_height = int(base_img.size[1] * scale_final)
-            if final_width > 0 and final_height > 0:
-                 base_img = base_img.resize(
-                     (final_width, final_height),
-                     Image.Resampling.LANCZOS,
-                 )
-                 print(f"Resized final image to ({final_width}, {final_height}) (max dimension 512px)")
-            else:
-                 print("Warning: Final calculated dimensions are zero, skipping resize.")
-
-        elif temp_dim == 0:
-            print("Warning: Image has zero dimension before final resize.")
+        # Final resizing block is removed from this function
 
         return base_img
 
@@ -118,7 +94,6 @@ def process_image(base_img, mask_img, photo_img, position_info, is_swap=False, l
         import traceback
         traceback.print_exc()
         return None
-
 
 # --- Context Function and Loading Logic ---
 def load_image(source):
@@ -139,6 +114,7 @@ def load_image(source):
             return None
 
         # Return a copy to avoid issues with modifying the original object later
+        # Ensure image is loaded into memory, especially after download
         loaded_img = img.copy()
         img.close() # Close the file handle explicitly
         return loaded_img
@@ -155,7 +131,6 @@ def load_image(source):
     except Exception as e:
         print(f"Error loading image {source}: {e}")
         return None
-
 
 def get_required_assets(template_id, positions_data, photo_paths, template_dir):
     """Determines required photos and masks based on config."""
@@ -185,15 +160,16 @@ def get_required_assets(template_id, positions_data, photo_paths, template_dir):
         mask_filename = f"mask{current_id}.png"
         mask_path = os.path.join(template_dir, mask_filename)
         if not os.path.exists(mask_path):
-            print(f"Warning: Mask file not found: {mask_path}")
+            print(f"Warning: Specific mask file not found: {mask_path}")
             # Attempt to use base template name convention if mask specific name not found
+            # Heuristic: Try mask name matching the original template ID
             base_mask_filename = f"mask{template_id}.png"
             base_mask_path = os.path.join(template_dir, base_mask_filename)
             if os.path.exists(base_mask_path):
                  print(f"Using base mask file instead: {base_mask_path}")
                  required_mask_paths.append(base_mask_path)
             else:
-                 print(f"Error: Base mask file also not found: {base_mask_path}")
+                 print(f"Error: Base mask file also not found: {base_mask_path}. A mask file is required.")
                  return None, None, None
         else:
             required_mask_paths.append(mask_path)
@@ -220,37 +196,41 @@ def get_required_assets(template_id, positions_data, photo_paths, template_dir):
 
     return final_photo_paths, required_mask_paths, required_position_info
 
-
 # --- Main Execution ---
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Composite profile pictures onto templates using masks.")
+    # Removed --detect-position and --id arguments
     parser.add_argument("--template", required=True, help="Path to the base template image (e.g., 'templates/eatID.png'). The ID is extracted from the filename.")
     parser.add_argument("--profilephoto", required=True, nargs='+', help="Path(s) or URL(s) to the profile photo(s). Provide in order needed by template.")
     parser.add_argument("--output", required=True, help="Path to save the final composited image.")
     parser.add_argument("--config", default="config.json", help="Path to the configuration JSON file (default: config.json).")
     parser.add_argument("--swap", action='store_true', help="Use swapped layering (base image on top).")
 
-
     args = parser.parse_args()
+
+    # --- Processing Mode --- (No mode selection needed anymore)
+    print("--- Running in Image Processing Mode ---")
 
     # --- Load Configuration ---
     try:
-        with open(args.config, 'r', encoding='utf-8') as f:
-            config_data = json.load(f)
-        positions = config_data.get("positions", {})
+        positions = {}
+        if os.path.exists(args.config):
+            with open(args.config, 'r', encoding='utf-8') as f:
+                try:
+                    config_data = json.load(f)
+                    positions = config_data.get("positions", {})
+                except json.JSONDecodeError:
+                     print(f"Warning: Config file {args.config} contains invalid JSON. Proceeding without positions.")
+        else:
+             print(f"Info: Config file {args.config} not found. Proceeding without pre-defined positions.")
+
         if not positions:
-            print(f"Error: 'positions' data not found or empty in {args.config}")
-            exit(1)
-    except FileNotFoundError:
-        print(f"Error: Config file not found: {args.config}")
-        exit(1)
-    except json.JSONDecodeError:
-        print(f"Error: Could not decode JSON from config file: {args.config}")
-        exit(1)
+            print(f"Warning: 'positions' data not found or empty in {args.config}")
+            # Depending on use case, you might want to exit if config is essential
+            # sys.exit(1)
     except Exception as e:
         print(f"Error loading config file {args.config}: {e}")
-        exit(1)
-
+        sys.exit(1)
 
     # --- Determine Template ID and Paths ---
     template_path = args.template
@@ -263,10 +243,15 @@ if __name__ == "__main__":
     match = re.match(r"eat([a-zA-Z0-9_]+)\.png", template_filename, re.IGNORECASE)
     if not match:
         print(f"Error: Could not extract template ID from filename: {template_filename}. Expected format like 'eatID.png'.")
-        exit(1)
+        sys.exit(1)
     template_id = match.group(1).lower() # Use lowercase for consistency
     print(f"Using Template ID: {template_id}")
 
+    # Check if template ID exists in loaded positions
+    if template_id not in positions:
+         print(f"Error: Template ID '{template_id}' extracted from filename is not defined in the 'positions' section of {args.config}.")
+         print("Available IDs:", list(positions.keys()))
+         sys.exit(1)
 
     # --- Determine Required Photos and Masks ---
     req_photo_sources, req_mask_paths, req_positions = get_required_assets(
@@ -274,27 +259,25 @@ if __name__ == "__main__":
     )
 
     if req_photo_sources is None:
-        exit(1) # Error message already printed
+        sys.exit(1) # Error message already printed
 
     print(f"Required photos sources: {req_photo_sources}")
     print(f"Required masks paths: {req_mask_paths}")
     print(f"Processing positions: {req_positions}")
 
-
     # --- Load Base and Asset Images ---
     base_image = load_image(template_path)
-    if base_image is None:
-        exit(1)
+    if base_image is None: sys.exit(1)
 
     profile_images = [load_image(src) for src in req_photo_sources]
     if any(img is None for img in profile_images):
         print("Error loading one or more profile photos.")
-        exit(1)
+        sys.exit(1)
 
     mask_images = [load_image(path) for path in req_mask_paths]
     if any(img is None for img in mask_images):
         print("Error loading one or more mask images.")
-        exit(1)
+        sys.exit(1)
 
     # --- Perform Image Processing Iteratively ---
     current_base = base_image.copy() # Start with a copy of the base
@@ -303,51 +286,74 @@ if __name__ == "__main__":
     for i in range(len(req_photo_sources)):
          current_photo = profile_images[i]
          current_mask = mask_images[i]
-         current_position = req_positions[i]
+         current_position = req_positions[i] # The list like [x, y] or [x, y, "next_id"]
 
          print(f"\nProcessing step {i+1} using photo {i+1} and mask {i+1}")
          processed_base = process_image(
              current_base,
              current_mask,
              current_photo,
-             current_position,
+             current_position, # Pass the whole position info list
              args.swap,
              layer=i # Use index as layer indicator
          )
 
          if processed_base is None:
              print(f"Error occurred during processing step {i+1}. Aborting.")
-             exit(1)
+             sys.exit(1)
          else:
-             current_base = processed_base
+             current_base = processed_base # Update the base for the next iteration
 
+    # --- Apply Final Resize AFTER loop ---
+    print("\nApplying final resize to 512px max dimension...")
+    final_image = current_base # Start with the fully composited image
+    temp_dim = max(final_image.size[0], final_image.size[1])
+    if temp_dim != 512 and temp_dim > 0:
+        scale_final = 512 / temp_dim
+        final_width = int(final_image.size[0] * scale_final)
+        final_height = int(final_image.size[1] * scale_final)
+        if final_width > 0 and final_height > 0:
+             final_image = final_image.resize(
+                 (final_width, final_height),
+                 Image.Resampling.LANCZOS,
+             )
+             print(f"Resized final image to ({final_width}, {final_height})")
+        else:
+             print("Warning: Final calculated dimensions for resize are zero, skipping.")
+    elif temp_dim == 0:
+        print("Warning: Image has zero dimension before final resize.")
+    else:
+        print("Final image already has max dimension 512px. No resize needed.")
 
     # --- Save Result ---
     try:
         output_format = os.path.splitext(args.output)[1][1:].upper()
-        if not output_format:
-            output_format = "PNG" # Default to PNG if no extension
-        # PIL format mapping might be needed for some extensions
+        if not output_format: output_format = "PNG"
         if output_format == "JPG": output_format = "JPEG"
 
         print(f"\nSaving final image to: {args.output} (Format: {output_format})")
-        # Ensure the output directory exists
         output_dir = os.path.dirname(args.output)
         if output_dir and not os.path.exists(output_dir):
             os.makedirs(output_dir)
             print(f"Created output directory: {output_dir}")
 
-        # Handle formats that don't support transparency well (like JPEG)
         if output_format == 'JPEG':
              print("Output format is JPEG, converting to RGB...")
-             current_base = current_base.convert('RGB')
+             # Create a white background and paste the RGBA image onto it
+             bg = Image.new("RGB", final_image.size, (255, 255, 255))
+             # Ensure alpha channel exists before splitting
+             if final_image.mode == 'RGBA':
+                 bg.paste(final_image, mask=final_image.split()[3]) # Use alpha channel as mask
+             else:
+                 bg.paste(final_image) # Paste directly if no alpha
+             final_image = bg
 
-        current_base.save(args.output, format=output_format)
+        final_image.save(args.output, format=output_format)
         print("Image processing complete.")
 
     except ValueError as e:
          print(f"Error saving output image to {args.output}: Unsupported format '{output_format}'? Full error: {e}")
-         exit(1)
+         sys.exit(1)
     except Exception as e:
         print(f"Error saving output image to {args.output}: {e}")
-        exit(1)
+        sys.exit(1)
